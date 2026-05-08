@@ -30,6 +30,7 @@ distlib==0.3.8
 dnspython==2.8.0
 Django==5.0.1
 Eel==0.16.0
+email-validator==2.3.0
 executing==2.0.1
 fastapi==0.136.1
 fastrlock==0.8.2
