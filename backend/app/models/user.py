@@ -42,3 +42,15 @@ class UserResponse(UserBase):
 
     # Passwords must never be returned by API responses.
     # Only hashed passwords should be stored later, and even hashes stay server-side.
+
+
+class TokenResponse(BaseModel):
+    access_token: str = Field(
+        description="JWT access token used for authenticated requests.",
+        examples=["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."],
+    )
+    token_type: str = Field(
+        default="bearer",
+        description="Authentication scheme for the access token.",
+        examples=["bearer"],
+    )

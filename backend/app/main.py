@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import ALLOWED_ORIGINS
+from app.routes.auth import router as auth_router
 from app.routes.recommend import router as recommend_router
 
 app = FastAPI(title="Project PI API")
@@ -16,6 +17,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth_router)
 app.include_router(recommend_router)
 
 
