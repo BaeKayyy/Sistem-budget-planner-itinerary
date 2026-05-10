@@ -4,9 +4,9 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from pymongo.errors import PyMongoError
 
-from app.core.security import hash_password, verify_password
-from app.database.mongodb import MongoDBConnectionError, get_database
-from app.models.user import UserRegister
+from ..core.security import hash_password, verify_password
+from ..database.mongodb import MongoDBConnectionError, get_database
+from ..models.user import UserRegister
 
 
 USERS_COLLECTION = "users"

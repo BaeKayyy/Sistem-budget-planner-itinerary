@@ -1,14 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 
-from app.core.auth import (
+from ..core.auth import (
     JWTConfigurationError,
     JWTTokenError,
     create_access_token,
     verify_access_token,
 )
-from app.models.user import TokenResponse, UserLogin, UserRegister, UserResponse
-from app.services.auth_service import (
+from ..models.user import TokenResponse, UserLogin, UserRegister, UserResponse
+from ..services.auth_service import (
     AuthServiceError,
     InvalidCredentialsError,
     UserAlreadyExistsError,

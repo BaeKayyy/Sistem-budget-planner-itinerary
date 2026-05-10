@@ -2,8 +2,8 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from app.models.recommendation import RecommendationResponse, SystemStatusResponse
-from app.services.recommender import (
+from ..models.recommendation import RecommendationResponse, SystemStatusResponse
+from ..services.recommender import (
     RecommenderLoadError,
     get_system_status,
     recommend_places,
