@@ -1,6 +1,7 @@
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 
 class UserRegister(BaseModel):
@@ -79,23 +80,58 @@ class SystemStatusResponse(BaseModel):
 
 
 class BudgetItem(BaseModel):
+    hotel: int = Field(ge=0)
     wisata: int = Field(ge=0)
     kuliner: int = Field(ge=0)
     oleh_oleh: int = Field(default=0, ge=0)
-    hotel: int = Field(ge=0)
     transport: int = Field(default=0, ge=0)
+
+
+class AllocationPercent(BaseModel):
+    hotel: int = Field(ge=0, le=100)
+    wisata: int = Field(ge=0, le=100)
+    kuliner: int = Field(ge=0, le=100)
+    oleh_oleh: int = Field(ge=0, le=100)
+    transport: int = Field(ge=0, le=100)
+
+    @model_validator(mode="after")
+    def validate_total_percentage(self):
+        total = self.hotel + self.wisata + self.kuliner + self.oleh_oleh + self.transport
+        if total != 100:
+            raise ValueError("Total allocation percentage must be 100%.")
+        return self
 
 
 class BudgetPlannerRequest(BaseModel):
     destination: str = Field(min_length=1)
     days: int = Field(ge=1, le=14)
-    budget: int = Field(ge=0)
+    budget: int = Field(gt=0)
+    people: int = Field(default=1, ge=1)
     interests: list[str] = Field(default_factory=list)
+    allocation_mode: Literal["default", "custom"] = "default"
+    custom_allocation: AllocationPercent | None = None
+    transport_mode: Literal["motor_pribadi", "mobil_pribadi", "ojol"] = "motor_pribadi"
+
+    @model_validator(mode="after")
+    def validate_custom_allocation(self):
+        if self.allocation_mode == "custom" and self.custom_allocation is None:
+            raise ValueError("custom_allocation is required when allocation_mode is custom.")
+        return self
 
 
 class BudgetPlannerResponse(BaseModel):
     destination: str
+    budget_total: int
     days: int
+    people: int
+    budget_per_day: int
+    budget_per_person: int
+    allocation_mode: str
+    allocation_percent: AllocationPercent
+    allocation: BudgetItem
+    transport_mode: str
+    transport_estimate: int
+    transport_within_budget: bool
     user_budget: int
     estimated_total_cost: int
     remaining_budget: int
@@ -107,8 +143,18 @@ class BudgetPlannerResponse(BaseModel):
 class ItineraryGenerateRequest(BaseModel):
     destination: str = Field(min_length=1)
     days: int = Field(ge=1, le=14)
-    budget: int = Field(ge=0)
+    budget: int = Field(gt=0)
+    people: int = Field(default=1, ge=1)
     interests: list[str] = Field(default_factory=list)
+    allocation_mode: Literal["default", "custom"] = "default"
+    custom_allocation: AllocationPercent | None = None
+    transport_mode: Literal["motor_pribadi", "mobil_pribadi", "ojol"] = "motor_pribadi"
+
+    @model_validator(mode="after")
+    def validate_custom_allocation(self):
+        if self.allocation_mode == "custom" and self.custom_allocation is None:
+            raise ValueError("custom_allocation is required when allocation_mode is custom.")
+        return self
 
 
 class ItineraryPlace(BaseModel):
@@ -128,9 +174,14 @@ class Itinerary(BaseModel):
     id: str
     user_id: str
     destination: str
+    people: int = 1
     days: list[ItineraryDay]
     estimated_total_cost: int = Field(ge=0)
     budget: int = Field(ge=0)
+    allocation: BudgetItem | None = None
+    allocation_percent: AllocationPercent | None = None
+    transport_mode: str | None = None
+    transport_estimate: int = 0
     within_budget: bool
     created_at: datetime
 

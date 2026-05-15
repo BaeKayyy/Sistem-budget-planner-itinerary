@@ -12,6 +12,7 @@ from pymongo.errors import PyMongoError
 from .auth import get_current_user
 from .database import MongoDBConnectionError, get_database
 from .models import (
+    AllocationPercent,
     BudgetItem,
     BudgetPlannerRequest,
     BudgetPlannerResponse,
@@ -25,9 +26,20 @@ from .recommendation import dataset, recommend_places
 router = APIRouter(tags=["Itinerary and Budget"])
 
 ITINERARIES_COLLECTION = "itineraries"
-TRANSPORT_PER_DAY = 30_000
 FALLBACK_POOL_SIZE = 30
 RANDOM_TOP_N = 10
+DEFAULT_ALLOCATION = AllocationPercent(
+    hotel=30,
+    wisata=25,
+    kuliner=20,
+    oleh_oleh=15,
+    transport=10,
+)
+TRANSPORT_COST_PER_DAY = {
+    "motor_pribadi": 25_000,
+    "mobil_pribadi": 80_000,
+    "ojol": 60_000,
+}
 
 # Simple PI-friendly daily travel pattern.
 DAY_TEMPLATE = [
@@ -57,27 +69,56 @@ def serialize_itinerary(document: dict) -> dict:
         "id": str(document["_id"]),
         "user_id": document["user_id"],
         "destination": document["destination"],
+        "people": document.get("people", 1),
         "days": document["days"],
         "estimated_total_cost": document["estimated_total_cost"],
         "budget": document["budget"],
+        "allocation": document.get("allocation"),
+        "allocation_percent": document.get("allocation_percent"),
+        "transport_mode": document.get("transport_mode"),
+        "transport_estimate": document.get("transport_estimate", 0),
         "within_budget": document["within_budget"],
         "created_at": document["created_at"],
     }
 
 
-def estimate_transport(days: int) -> int:
-    """Static local transport estimate. No live transport API is used."""
-    return days * TRANSPORT_PER_DAY
+def get_allocation_percent(request: BudgetPlannerRequest | ItineraryGenerateRequest) -> AllocationPercent:
+    if request.allocation_mode == "custom":
+        if request.custom_allocation is None:
+            raise HTTPException(status_code=422, detail="custom_allocation is required.")
+        return request.custom_allocation
+    return DEFAULT_ALLOCATION
 
 
-def allocate_budget(total_budget: int) -> dict[str, int]:
-    """Simple custom budget allocation by category."""
+def estimate_transport(days: int, transport_mode: str) -> int:
+    """Static local transport estimate. No maps, fuel, toll, or live API is used."""
+    return days * TRANSPORT_COST_PER_DAY.get(transport_mode, TRANSPORT_COST_PER_DAY["motor_pribadi"])
+
+
+def calculate_budget_plan(
+    total_budget: int,
+    days: int,
+    people: int,
+    allocation_percent: AllocationPercent,
+    transport_mode: str,
+) -> dict:
+    """Convert percentage allocation into nominal category budgets."""
+    allocation = {
+        "hotel": total_budget * allocation_percent.hotel // 100,
+        "wisata": total_budget * allocation_percent.wisata // 100,
+        "kuliner": total_budget * allocation_percent.kuliner // 100,
+        "oleh_oleh": total_budget * allocation_percent.oleh_oleh // 100,
+        "transport": total_budget * allocation_percent.transport // 100,
+    }
+
     return {
-        "wisata": int(total_budget * 0.20),
-        "kuliner": int(total_budget * 0.25),
-        "oleh_oleh": int(total_budget * 0.15),
-        "hotel": int(total_budget * 0.30),
-        "transport": int(total_budget * 0.10),
+        "budget_total": total_budget,
+        "days": days,
+        "people": people,
+        "budget_per_day": total_budget // days,
+        "budget_per_person": total_budget // (days * people),
+        "allocation": allocation,
+        "transport_estimate": estimate_transport(days, transport_mode),
     }
 
 
@@ -143,6 +184,16 @@ def pick_place(pool: list[dict], used_names: set[str], budget_remaining: int) ->
     if not available:
         return None
 
+    # Bigger budgets can use higher-rated places more flexibly.
+    if budget_remaining >= 150_000:
+        available = sorted(
+            available,
+            key=lambda item: (float(item.get("rating") or 0), -int(item.get("price_estimate") or 0)),
+            reverse=True,
+        )
+    else:
+        available = sorted(available, key=lambda item: int(item.get("price_estimate") or 0))
+
     top_candidates = available[:RANDOM_TOP_N]
     random.shuffle(top_candidates)
     available = top_candidates + available[RANDOM_TOP_N:]
@@ -155,7 +206,20 @@ def pick_place(pool: list[dict], used_names: set[str], budget_remaining: int) ->
 
 
 def generate_itinerary(user_id: str, request: ItineraryGenerateRequest) -> dict:
-    budget_remaining = request.budget
+    allocation_percent = get_allocation_percent(request)
+    budget_plan = calculate_budget_plan(
+        total_budget=request.budget,
+        days=request.days,
+        people=request.people,
+        allocation_percent=allocation_percent,
+        transport_mode=request.transport_mode,
+    )
+    category_remaining = budget_plan["allocation"].copy()
+    category_remaining["transport"] = max(
+        0,
+        category_remaining["transport"] - budget_plan["transport_estimate"],
+    )
+
     total_cost = 0
     used_names: set[str] = set()
     itinerary_days: list[dict] = []
@@ -167,10 +231,11 @@ def generate_itinerary(user_id: str, request: ItineraryGenerateRequest) -> dict:
 
     for day_number in range(1, request.days + 1):
         day_places = []
-        day_cost = TRANSPORT_PER_DAY
+        day_cost = budget_plan["transport_estimate"] // request.days
 
         for place_type, _slot in DAY_TEMPLATE:
-            picked = pick_place(pools[place_type], used_names, budget_remaining)
+            daily_category_budget = max(0, category_remaining[place_type] // (request.days - day_number + 1))
+            picked = pick_place(pools[place_type], used_names, daily_category_budget)
             if picked is None:
                 continue
 
@@ -178,7 +243,7 @@ def generate_itinerary(user_id: str, request: ItineraryGenerateRequest) -> dict:
             price = int(picked.get("price_estimate") or 0)
 
             used_names.add(name)
-            budget_remaining = max(0, budget_remaining - price)
+            category_remaining[place_type] = max(0, category_remaining[place_type] - price)
             day_cost += price
 
             day_places.append(
@@ -202,9 +267,14 @@ def generate_itinerary(user_id: str, request: ItineraryGenerateRequest) -> dict:
     document = {
         "user_id": user_id,
         "destination": request.destination,
+        "people": request.people,
         "days": itinerary_days,
         "estimated_total_cost": total_cost,
         "budget": request.budget,
+        "allocation": budget_plan["allocation"],
+        "allocation_percent": allocation_percent.model_dump(),
+        "transport_mode": request.transport_mode,
+        "transport_estimate": budget_plan["transport_estimate"],
         "within_budget": total_cost <= request.budget,
         "created_at": datetime.now(timezone.utc),
     }
@@ -249,55 +319,51 @@ def delete_itinerary(user_id: str, itinerary_id: str) -> None:
 
 
 def plan_budget(request: BudgetPlannerRequest) -> BudgetPlannerResponse:
-    used_names: set[str] = set()
-    budget_plan = allocate_budget(request.budget)
-    breakdown = {
-        "wisata": 0,
-        "kuliner": 0,
-        "oleh_oleh": 0,
-        "hotel": 0,
-        "transport": estimate_transport(request.days),
-    }
-
-    pools = {
-        place_type: build_candidate_pool(request.interests, place_type)
-        for place_type, _slot in DAY_TEMPLATE
-    }
-
-    for _day_number in range(1, request.days + 1):
-        for place_type, _slot in DAY_TEMPLATE:
-            picked = pick_place(pools[place_type], used_names, 999_999_999)
-            if picked is None:
-                continue
-
-            name = (picked.get("name") or "").strip()
-            used_names.add(name)
-            breakdown[place_type] += int(picked.get("price_estimate") or 0)
-
-    total_cost = sum(breakdown.values())
-    remaining = request.budget - total_cost
-    over_budget = total_cost > request.budget
+    allocation_percent = get_allocation_percent(request)
+    budget_plan = calculate_budget_plan(
+        total_budget=request.budget,
+        days=request.days,
+        people=request.people,
+        allocation_percent=allocation_percent,
+        transport_mode=request.transport_mode,
+    )
+    allocation = budget_plan["allocation"]
+    transport_estimate = budget_plan["transport_estimate"]
+    transport_within_budget = transport_estimate <= allocation["transport"]
+    over_budget = not transport_within_budget
+    remaining = request.budget - transport_estimate
 
     messages = [
-        f"Estimated transport cost: Rp{breakdown['transport']:,}".replace(",", "."),
-        f"Suggested hotel allocation: Rp{budget_plan['hotel']:,}".replace(",", "."),
+        f"Budget per day: Rp{budget_plan['budget_per_day']:,}".replace(",", "."),
+        f"Budget per person: Rp{budget_plan['budget_per_person']:,}".replace(",", "."),
+        f"Transport estimate: Rp{transport_estimate:,}".replace(",", "."),
     ]
-    if over_budget:
+
+    if not transport_within_budget:
         messages.append(
-            f"Trip exceeds budget by Rp{abs(remaining):,}".replace(",", ".")
+            "Transport estimate exceeds the allocated transport budget."
         )
-        messages.append("Consider reducing days or selecting cheaper categories.")
     else:
-        messages.append("Budget is sufficient for this trip.")
+        messages.append("Budget allocation is valid and ready for itinerary generation.")
 
     return BudgetPlannerResponse(
         destination=request.destination,
+        budget_total=request.budget,
         days=request.days,
+        people=request.people,
+        budget_per_day=budget_plan["budget_per_day"],
+        budget_per_person=budget_plan["budget_per_person"],
+        allocation_mode=request.allocation_mode,
+        allocation_percent=allocation_percent,
+        allocation=BudgetItem(**allocation),
+        transport_mode=request.transport_mode,
+        transport_estimate=transport_estimate,
+        transport_within_budget=transport_within_budget,
         user_budget=request.budget,
-        estimated_total_cost=total_cost,
+        estimated_total_cost=transport_estimate,
         remaining_budget=remaining,
         over_budget=over_budget,
-        breakdown=BudgetItem(**breakdown),
+        breakdown=BudgetItem(**allocation),
         recommendations=messages,
     )
 
